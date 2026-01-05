@@ -32,6 +32,10 @@ describe("build commands", () => {
   it("expects all output bundle files to be generated", async () => {
     const { generateBuildOutput, validateOutputDirectory } = await importUtils;
     const files = {
+      // .next/standalone/.next/ must be created beforehand otherwise
+      // generateBuildOutput will attempt to copy
+      // .next/ into .next/standalone/.next
+      ".next/standalone/.next/package.json": "",
       ".next/standalone/server.js": "",
       ".next/static/staticfile": "",
       ".next/routes-manifest.json": `{
@@ -53,7 +57,13 @@ describe("build commands", () => {
 
     const expectedFiles = {
       ".next/standalone/.next/static/staticfile": "",
+      ".next/static/staticfile": "",
       ".next/standalone/server.js": "",
+      ".next/routes-manifest.json": `{
+        "headers":[],
+        "rewrites":[],
+        "redirects":[]
+      }`,
       ".apphosting/bundle.yaml": `version: v1
 runConfig:
   runCommand: node .next/standalone/server.js
@@ -62,12 +72,16 @@ metadata:
   adapterVersion: ${adapterMetadata.adapterVersion}
   framework: nextjs
   frameworkVersion: ${defaultNextVersion}
+outputFiles:
+  serverApp:
+    include:
+      - .next/standalone
 `,
     };
     validateTestFiles(tmpDir, expectedFiles);
   });
 
-  it("moves files into correct location in a monorepo setup", async () => {
+  it("copies files into correct location in a monorepo setup", async () => {
     const { generateBuildOutput } = await importUtils;
     const files = {
       ".next/standalone/apps/next-app/standalonefile": "",
@@ -109,6 +123,7 @@ metadata:
     const expectedFiles = {
       ".next/standalone/apps/next-app/.next/static/staticfile": "",
       ".next/standalone/apps/next-app/standalonefile": "",
+      ".next/static/staticfile": "",
     };
     const expectedPartialYaml = {
       version: "v1",
@@ -121,6 +136,10 @@ metadata:
   it("test failed validateOutputDirectory", async () => {
     const { generateBuildOutput, validateOutputDirectory } = await importUtils;
     const files = {
+      // .next/standalone/.next/ must be created beforehand otherwise
+      // generateBuildOutput will attempt to copy
+      // .next/ into .next/standalone/.next
+      ".next/standalone/.next/package.json": "",
       ".next/standalone/notserver.js": "",
       ".next/static/staticfile": "",
       ".next/routes-manifest.json": `{
@@ -145,9 +164,102 @@ metadata:
       async () => await validateOutputDirectory(outputBundleOptions, path.join(tmpDir, ".next")),
     );
   });
+  it(".apphosting gitignored correctly in a monorepo setup", async () => {
+    const { generateBuildOutput } = await importUtils;
+    const files = {
+      ".next/standalone/apps/next-app/standalonefile": "",
+      ".next/static/staticfile": "",
+    };
+    generateTestFiles(tmpDir, files);
+    const standaloneAppPath = path.join(tmpDir, ".next", "standalone", "apps", "next-app");
+    await generateBuildOutput(
+      tmpDir,
+      "apps/next-app",
+      {
+        bundleYamlPath: path.join(tmpDir, ".apphosting", "bundle.yaml"),
+        outputDirectoryBasePath: path.join(tmpDir, ".apphosting"),
+        outputDirectoryAppPath: standaloneAppPath,
+        outputPublicDirectoryPath: path.join(standaloneAppPath, "public"),
+        outputStaticDirectoryPath: path.join(standaloneAppPath, ".next", "static"),
+        serverFilePath: path.join(standaloneAppPath, "server.js"),
+      },
+      path.join(tmpDir, ".next"),
+      defaultNextVersion,
+      adapterMetadata,
+    );
+
+    const expectedFiles = {
+      ".gitignore": "/.apphosting/",
+    };
+    const expectedPartialYaml = {
+      version: "v1",
+      runConfig: { runCommand: "node .next/standalone/apps/next-app/server.js" },
+    };
+    validateTestFiles(tmpDir, expectedFiles);
+    validatePartialYamlContents(tmpDir, ".apphosting/bundle.yaml", expectedPartialYaml);
+  });
+
+  it(".apphosting gitignored without existing .gitignore file", async () => {
+    const { generateBuildOutput, validateOutputDirectory } = await importUtils;
+    const files = {
+      // .next/standalone/.next/ must be created beforehand otherwise
+      // generateBuildOutput will attempt to copy
+      // .next/ into .next/standalone/.next
+      ".next/standalone/.next/package.json": "",
+      ".next/static/staticfile": "",
+    };
+    generateTestFiles(tmpDir, files);
+    await generateBuildOutput(
+      tmpDir,
+      tmpDir,
+      outputBundleOptions,
+      path.join(tmpDir, ".next"),
+      defaultNextVersion,
+      adapterMetadata,
+    );
+    await validateOutputDirectory(outputBundleOptions, path.join(tmpDir, ".next"));
+
+    const expectedFiles = {
+      ".gitignore": "/.apphosting/",
+    };
+    validateTestFiles(tmpDir, expectedFiles);
+  });
+  it(".apphosting gitignored in existing .gitignore file", async () => {
+    const { generateBuildOutput, validateOutputDirectory } = await importUtils;
+    const files = {
+      // .next/standalone/.next/ must be created beforehand otherwise
+      // generateBuildOutput will attempt to copy
+      // .next/ into .next/standalone/.next
+      ".next/standalone/.next/package.json": "",
+      ".next/static/staticfile": "",
+      ".gitignore": "/.next/",
+    };
+    generateTestFiles(tmpDir, files);
+    await generateBuildOutput(
+      tmpDir,
+      tmpDir,
+      outputBundleOptions,
+      path.join(tmpDir, ".next"),
+      defaultNextVersion,
+      {
+        adapterPackageName: "@apphosting/adapter-nextjs",
+        adapterVersion: "14.0.1",
+      },
+    );
+    await validateOutputDirectory(outputBundleOptions, path.join(tmpDir, ".next"));
+
+    const expectedFiles = {
+      ".gitignore": "/.next/\n/.apphosting/",
+    };
+    validateTestFiles(tmpDir, expectedFiles);
+  });
   it("expects directories and other files to be copied over", async () => {
     const { generateBuildOutput, validateOutputDirectory } = await importUtils;
     const files = {
+      // .next/standalone/.next/ must be created beforehand otherwise
+      // generateBuildOutput will attempt to copy
+      // .next/ into .next/standalone/.next
+      ".next/standalone/.next/package.json": "",
       ".next/standalone/server.js": "",
       ".next/static/staticfile": "",
       "public/publicfile": "",
@@ -165,18 +277,21 @@ metadata:
       outputBundleOptions,
       path.join(tmpDir, ".next"),
       defaultNextVersion,
-      {
-        adapterPackageName: "@apphosting/adapter-nextjs",
-        adapterVersion: "14.0.1",
-      },
+      adapterMetadata,
     );
     await validateOutputDirectory(outputBundleOptions, path.join(tmpDir, ".next"));
 
     const expectedFiles = {
       ".next/standalone/.next/static/staticfile": "",
+      ".next/static/staticfile": "",
       ".next/standalone/server.js": "",
       ".next/standalone/public/publicfile": "",
       ".next/standalone/extrafile": "",
+      ".next/routes-manifest.json": `{
+        "headers":[],
+        "rewrites":[],
+        "redirects":[]
+      }`,
     };
     validateTestFiles(tmpDir, expectedFiles);
   });

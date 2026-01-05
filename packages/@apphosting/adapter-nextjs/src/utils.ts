@@ -1,4 +1,5 @@
 import fsExtra from "fs-extra";
+import semVer from "semver";
 import { createRequire } from "node:module";
 import { join, dirname, relative, normalize } from "path";
 import { fileURLToPath } from "url";
@@ -12,11 +13,26 @@ import {
   MiddlewareManifest,
 } from "./interfaces.js";
 import { NextConfigComplete } from "next/dist/server/config-shared.js";
-import { OutputBundleConfig } from "@apphosting/common";
+import { OutputBundleConfig, updateOrCreateGitignore } from "@apphosting/common";
 
 // fs-extra is CJS, readJson can't be imported using shorthand
-export const { move, exists, writeFile, readJson, readdir, readFileSync, existsSync, mkdir } =
+export const { copy, exists, writeFile, readJson, readdir, readFileSync, existsSync, ensureDir } =
   fsExtra;
+export const { satisfies } = semVer;
+
+const SAFE_NEXTJS_VERSIONS =
+  ">=16.1.0 || ~16.0.7 || ~v15.5.7 || ~v15.4.8 || ~v15.3.6 || ~v15.2.6 || ~v15.1.9 || ~v15.0.5 || <14.3.0-canary.77";
+
+export function checkNextJSVersion(version: string | undefined) {
+  if (!version) {
+    return;
+  }
+  if (!satisfies(version, SAFE_NEXTJS_VERSIONS)) {
+    throw new Error(
+      `CVE-2025-55182: Vulnerable Next version ${version} detected. Deployment blocked. Update your app's dependencies to a patched Next.js version and redeploy: https://nextjs.org/blog/CVE-2025-66478#fixed-versions`,
+    );
+  }
+}
 
 // Loads the user's next.config.js file.
 export async function loadConfig(root: string, projectRoot: string): Promise<NextConfigComplete> {
@@ -116,7 +132,7 @@ export function populateOutputBundleOptions(
 }
 
 /**
- * Moves static assets and other resources into the standlone directory, also generates the bundle.yaml
+ * Copy static assets and other resources into the standlone directory, also generates the bundle.yaml
  * @param rootDir The root directory of the uploaded source code.
  * @param outputBundleOptions The target location of built artifacts in the output bundle.
  * @param nextBuildDirectory The location of the .next directory.
@@ -131,28 +147,34 @@ export async function generateBuildOutput(
 ): Promise<void> {
   const staticDirectory = join(nextBuildDirectory, "static");
   await Promise.all([
-    move(staticDirectory, opts.outputStaticDirectoryPath, { overwrite: true }),
-    moveResources(appDir, opts.outputDirectoryAppPath, opts.bundleYamlPath),
+    copy(staticDirectory, opts.outputStaticDirectoryPath, { overwrite: true }),
+    copyResources(appDir, opts.outputDirectoryAppPath, opts.bundleYamlPath),
     generateBundleYaml(opts, rootDir, nextVersion, adapterMetadata),
   ]);
+  // generateBundleYaml creates the output directory (if it does not already exist).
+  // We need to make sure it is gitignored.
+  const normalizedBundleDir = normalize(relative(rootDir, opts.outputDirectoryBasePath));
+  updateOrCreateGitignore(rootDir, [`/${normalizedBundleDir}/`]);
   return;
 }
 
-// Move all files and directories to apphosting output directory.
+// Copy all files and directories to apphosting output directory.
 // Files are skipped if there is already a file with the same name in the output directory
-async function moveResources(
+async function copyResources(
   appDir: string,
   outputBundleAppDir: string,
   bundleYamlPath: string,
 ): Promise<void> {
   const appDirExists = await exists(appDir);
   if (!appDirExists) return;
-  const pathsToMove = await readdir(appDir);
-  for (const path of pathsToMove) {
+  const pathsToCopy = await readdir(appDir);
+  for (const path of pathsToCopy) {
     const isbundleYamlDir = join(appDir, path) === dirname(bundleYamlPath);
     const existsInOutputBundle = await exists(join(outputBundleAppDir, path));
-    if (!isbundleYamlDir && !existsInOutputBundle) {
-      await move(join(appDir, path), join(outputBundleAppDir, path));
+    // Keep apphosting.yaml files in the root directory still, as later steps expect them to be there
+    const isApphostingYaml = path === "apphosting_preprocessed" || path === "apphosting.yaml";
+    if (!isbundleYamlDir && !existsInOutputBundle && !isApphostingYaml) {
+      await copy(join(appDir, path), join(outputBundleAppDir, path));
     }
   }
   return;
@@ -179,7 +201,7 @@ async function generateBundleYaml(
   nextVersion: string,
   adapterMetadata: AdapterMetadata,
 ): Promise<void> {
-  await mkdir(opts.outputDirectoryBasePath);
+  await ensureDir(opts.outputDirectoryBasePath);
   const outputBundle: OutputBundleConfig = {
     version: "v1",
     runConfig: {
@@ -191,6 +213,15 @@ async function generateBundleYaml(
       frameworkVersion: nextVersion,
     },
   };
+  // TODO (b/432285470) See if there is a way to also delete files for apps using Nx monorepos
+  if (!process.env.MONOREPO_COMMAND) {
+    outputBundle.outputFiles = {
+      serverApp: {
+        include: [normalize(relative(cwd, opts.outputDirectoryAppPath))],
+      },
+    };
+  }
+
   await writeFile(opts.bundleYamlPath, yamlStringify(outputBundle));
   return;
 }
